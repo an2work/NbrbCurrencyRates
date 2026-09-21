@@ -1,198 +1,126 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NbrbCurrencyRates.Models;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 
-
 namespace NbrbCurrencyRates.Services
 {
     public sealed class NbrbApiClient
     {
-        private static readonly HttpClient HttpClient =
-            CreateHttpClient();
+        private static readonly HttpClient HttpClient = CreateHttpClient();
 
         private static HttpClient CreateHttpClient()
         {
             var client = new HttpClient
             {
-                BaseAddress = new Uri(
-                    "https://api.nbrb.by/"),
-
+                BaseAddress = new Uri("https://api.nbrb.by/"),
                 Timeout = TimeSpan.FromSeconds(30)
             };
 
-            client.DefaultRequestHeaders.Add(
-                "Accept",
-                "application/json");
-
+            client.DefaultRequestHeaders.Add("Accept", "application/json");
             return client;
         }
 
-            public async Task<string>
-            GetAllCurrenciesRatesJsonAsync(
-                DateTime startDate,
-                DateTime endDate,
-                CancellationToken cancellationToken)
+        public async Task<string> GetAllCurrenciesRatesJsonAsync(
+            DateTime startDate,
+            DateTime endDate,
+            CancellationToken cancellationToken)
         {
             startDate = startDate.Date;
             endDate = endDate.Date;
-
             ValidatePeriod(startDate, endDate);
-
             cancellationToken.ThrowIfCancellationRequested();
 
-            List<CurrencyRateRow> currencies =
-                await GetCurrenciesAsync(
-                        cancellationToken)
-                    .ConfigureAwait(false);
+            List<CurrencyRateRow> currencies = await GetCurrenciesAsync(
+                cancellationToken).ConfigureAwait(false);
 
-            // Защищаемся от возможных повторяющихся Cur_ID.
             currencies = currencies
                 .GroupBy(currency => currency.Cur_ID)
                 .Select(group => group.First())
                 .ToList();
 
-            var allRatesJson = new JArray();
+            var allRates = new List<CurrencyRateRow>();
 
-            // Запросы выполняем последовательно.
-            // Это уменьшает нагрузку на API НБ РБ.
             foreach (CurrencyRateRow currency in currencies)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                string apiJson =
-                    await LoadCurrencyRatesJsonAsync(
-                            currency,
-                            startDate,
-                            endDate,
-                            cancellationToken)
-                        .ConfigureAwait(false);
+                List<CurrencyRateRow> returnedRates =
+                    await LoadCurrencyRatesAsync(
+                        currency,
+                        startDate,
+                        endDate,
+                        cancellationToken)
+                    .ConfigureAwait(false);
 
-                JArray apiRates = JArray.Parse(apiJson);
+                Dictionary<DateTime, CurrencyRateRow> ratesByDate = returnedRates
+                    .GroupBy(rate => rate.Date.Date)
+                    .ToDictionary(group => group.Key, group => group.First());
 
-                var ratesByDate =
-                    new Dictionary<DateTime, JObject>();
-
-                foreach (JToken token in apiRates)
-                {
-                    JObject rateObject =
-                        token as JObject;
-
-                    if (rateObject == null)
-                    {
-                        continue;
-                    }
-
-                    JToken dateToken =
-                        rateObject["Date"];
-
-                    if (dateToken == null)
-                    {
-                        continue;
-                    }
-
-                    DateTime rateDate;
-
-                    bool dateParsed =
-                        DateTime.TryParse(
-                            dateToken.ToString(),
-                            CultureInfo.InvariantCulture,
-                            DateTimeStyles.RoundtripKind,
-                            out rateDate);
-
-                    if (!dateParsed)
-                    {
-                        continue;
-                    }
-                    // Endpoint dynamics возвращает в основном
-                    // Cur_ID, Date и Cur_OfficialRate.
-                    // Добавляем остальные сведения о валюте,
-                    // чтобы их можно было показать в RadGridView.
-                    EnrichRateObject(
-                        rateObject,
-                        currency);
-
-                    ratesByDate[rateDate.Date] =
-                        rateObject;
-                }
-
-                // Формируем полную последовательность дат.
                 for (DateTime date = startDate;
                      date <= endDate;
                      date = date.AddDays(1))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    JObject rateObject;
-
-                    bool hasRate =
-                        ratesByDate.TryGetValue(
-                            date.Date,
-                            out rateObject);
-
-                    if (hasRate)
+                    CurrencyRateRow rate;
+                    if (!ratesByDate.TryGetValue(date.Date, out rate))
                     {
-                        // Сохраняем реальный объект курса.
-                        allRatesJson.Add(
-                            rateObject.DeepClone());
+                        rate = new CurrencyRateRow
+                        {
+                            Cur_ID = currency.Cur_ID,
+                            Date = date,
+                            Cur_Code = currency.Cur_Code,
+                            Cur_Abbreviation = currency.Cur_Abbreviation,
+                            Cur_Name = currency.Cur_Name,
+                            Cur_Scale = currency.Cur_Scale,
+                            Cur_OfficialRate = string.Empty
+                        };
                     }
                     else
                     {
-                        // Если API не вернуло курс,
-                        // добавляем пустую запись.
-                        allRatesJson.Add(
-                            CreateEmptyRateObject(
-                                currency,
-                                date));
+                        ApplyCurrencyMetadata(rate, currency);
                     }
+
+                    allRates.Add(rate);
                 }
             }
 
-            string resultJson = allRatesJson.ToString(
+            return JsonConvert.SerializeObject(
+                allRates,
                 Formatting.Indented);
-
-            // Logging removed to keep client minimal.
-            return resultJson;
         }
 
-        private async Task<List<CurrencyRateRow>>
-            GetCurrenciesAsync(
-                CancellationToken cancellationToken)
+        private async Task<List<CurrencyRateRow>> GetCurrenciesAsync(
+            CancellationToken cancellationToken)
         {
-            string json =
-                await GetJsonAsync(
-                        "exrates/currencies",
-                        cancellationToken)
-                    .ConfigureAwait(false);
+            string json = await GetJsonAsync(
+                "exrates/currencies",
+                cancellationToken).ConfigureAwait(false);
 
-            return JsonConvert.DeserializeObject<
-                       List<CurrencyRateRow>>(json)
-                   ?? new List<CurrencyRateRow>();
+            return JsonConvert.DeserializeObject<List<CurrencyRateRow>>(json)
+                ?? new List<CurrencyRateRow>();
         }
 
-        private async Task<string>
-            LoadCurrencyRatesJsonAsync(
-                CurrencyRateRow currency,
-                DateTime startDate,
-                DateTime endDate,
-                CancellationToken cancellationToken)
+        private async Task<List<CurrencyRateRow>> LoadCurrencyRatesAsync(
+            CurrencyRateRow currency,
+            DateTime startDate,
+            DateTime endDate,
+            CancellationToken cancellationToken)
         {
-            string start =
-                startDate.ToString(
-                    "yyyy-MM-dd",
-                    CultureInfo.InvariantCulture);
+            string start = startDate.ToString(
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture);
 
-            string end =
-                endDate.ToString(
-                    "yyyy-MM-dd",
-                    CultureInfo.InvariantCulture);
+            string end = endDate.ToString(
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture);
 
             string requestUri =
                 "exrates/rates/dynamics/" +
@@ -200,10 +128,60 @@ namespace NbrbCurrencyRates.Services
                 "?startdate=" + start +
                 "&enddate=" + end;
 
-            return await GetJsonAsync(
-                    requestUri,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            string json = await GetJsonAsync(
+                requestUri,
+                cancellationToken).ConfigureAwait(false);
+
+            return JsonConvert.DeserializeObject<List<CurrencyRateRow>>(json)
+                ?? new List<CurrencyRateRow>();
+        }
+
+        private static void ApplyCurrencyMetadata(
+            CurrencyRateRow rate,
+            CurrencyRateRow currency)
+        {
+            rate.Cur_ID = currency.Cur_ID;
+            rate.Cur_Code = currency.Cur_Code;
+            rate.Cur_Abbreviation = currency.Cur_Abbreviation;
+            rate.Cur_Name = currency.Cur_Name;
+            rate.Cur_Scale = currency.Cur_Scale;
+
+            if (rate.Cur_OfficialRate == null)
+            {
+                rate.Cur_OfficialRate = string.Empty;
+            }
+        }
+
+        private static async Task<string> GetJsonAsync(
+            string requestUri,
+            CancellationToken cancellationToken)
+        {
+            using (HttpResponseMessage response = await HttpClient
+                .GetAsync(requestUri, cancellationToken)
+                .ConfigureAwait(false))
+            {
+                response.EnsureSuccessStatusCode();
+                return await response.Content
+                    .ReadAsStringAsync()
+                    .ConfigureAwait(false);
+            }
+        }
+
+        private static void ValidatePeriod(
+            DateTime startDate,
+            DateTime endDate)
+        {
+            if (startDate > endDate)
+            {
+                throw new ArgumentException(
+                    "Дата начала не может быть позже даты окончания.");
+            }
+
+            if ((endDate - startDate).TotalDays > 365)
+            {
+                throw new ArgumentException(
+                    "Период не должен превышать 365 дней.");
+            }
         }
 
         private static JObject CreateEmptyRateObject(
@@ -260,38 +238,5 @@ namespace NbrbCurrencyRates.Services
                 rateObject["Cur_OfficialRate"] = rateValue.ToString();
             }
         }
-
-        private static async Task<string> GetJsonAsync(
-            string requestUri,
-            CancellationToken cancellationToken)
-        {
-            using (HttpResponseMessage response =
-                await HttpClient.GetAsync(
-                    requestUri,
-                    cancellationToken).ConfigureAwait(false))
-            {
-                response.EnsureSuccessStatusCode();
-                return await response.Content.ReadAsStringAsync()
-                    .ConfigureAwait(false);
-            }
-        }
-
-        private static void ValidatePeriod(
-            DateTime startDate,
-            DateTime endDate)
-        {
-            if (startDate > endDate)
-            {
-                throw new ArgumentException(
-                    "Дата начала не может быть позже даты окончания.");
-            }
-
-            if ((endDate - startDate).TotalDays > 365)
-            {
-                throw new ArgumentException(
-                    "Период не должен превышать 365 дней.");
-            }
-        }
-
     }
 }
