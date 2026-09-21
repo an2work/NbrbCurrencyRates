@@ -1,4 +1,4 @@
-﻿using NbrbCurrencyRates.Services;
+using NbrbCurrencyRates.Services;
 using NbrbCurrencyRates.ViewModels;
 using System;
 using System.IO;
@@ -10,80 +10,90 @@ namespace NbrbCurrencyRates
     {
         public App()
         {
-            AppDomain.CurrentDomain.UnhandledException += 
+            AppDomain.CurrentDomain.UnhandledException +=
                 (sender, args) =>
-            {
-                var exception = args.ExceptionObject as Exception;
-                LogError("AppDomain UnhandledException", exception);
-            };
+                {
+                    var exception = args.ExceptionObject as Exception;
+                    LogError("AppDomain UnhandledException", exception);
+                };
 
-            this.DispatcherUnhandledException += 
+            DispatcherUnhandledException +=
                 (sender, args) =>
-            {
-                LogError("Dispatcher UnhandledException", args.Exception);
-                args.Handled = true;
-                Current.Shutdown();
-            };
+                {
+                    LogError("DispatcherUnhandledException", args.Exception);
+                    args.Handled = true;
+                    Current.Shutdown();
+                };
         }
 
-        protected override void OnStartup(
-            StartupEventArgs e)
+        protected override void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
 
             try
             {
-                var nbrbApiClient =
-                    new NbrbApiClient();
+                var nbrbApiClient = new NbrbApiClient();
+                var jsonFileStorage = new JsonFileStorage();
 
-                var jsonFileStorage =
-                    new JsonFileStorage();
+                string dataDirectory = Path.Combine(
+                    Environment.GetFolderPath(
+                        Environment.SpecialFolder.LocalApplicationData),
+                    "NbrbCurrencyRates");
 
-                var viewModel =
-                    new MainViewModel(
-                        nbrbApiClient,
-                        jsonFileStorage,
-                        @"D:\nbrb-rates.json");
+                string dataFilePath = Path.Combine(
+                    dataDirectory,
+                    "nbrb-rates.json");
 
-                var window =
-                    new MainWindow(viewModel);
+                var viewModel = new MainViewModel(
+                    nbrbApiClient,
+                    jsonFileStorage,
+                    dataFilePath);
 
+                var window = new MainWindow(viewModel);
                 MainWindow = window;
-
-                LogError("Application Started Successfully", null);
-
                 window.Show();
             }
-            catch (System.Exception ex)
+            catch (Exception exception)
             {
-                LogError("OnStartup Exception", ex);
+                LogError("OnStartup Exception", exception);
                 MessageBox.Show(
-                    $"Ошибка при запуске приложения:\n{ex.Message}\n\n{ex.StackTrace}",
+                    "Ошибка при запуске приложения:\n" +
+                    exception.Message,
                     "Критическая ошибка",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
-                Current.Shutdown();
+                Shutdown();
             }
         }
 
-        private static void LogError(string title, Exception ex)
+        private static void LogError(string title, Exception exception)
         {
             try
             {
                 string logPath = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    Environment.GetFolderPath(
+                        Environment.SpecialFolder.ApplicationData),
                     "NbrbCurrencyRates",
                     "error.log");
 
-                Directory.CreateDirectory(Path.GetDirectoryName(logPath));
+                string directory = Path.GetDirectoryName(logPath);
+                if (!string.IsNullOrWhiteSpace(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
 
-                string message = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {title}\n{ex?.Message}\n{ex?.StackTrace}\n\n";
+                string message = string.Format(
+                    "[{0:yyyy-MM-dd HH:mm:ss}] {1}\n{2}\n{3}\n\n",
+                    DateTime.Now,
+                    title,
+                    exception?.Message,
+                    exception?.StackTrace);
 
                 File.AppendAllText(logPath, message);
             }
             catch
             {
-                // Ignore logging errors
+                // Ошибка логирования не должна завершать приложение.
             }
         }
     }
