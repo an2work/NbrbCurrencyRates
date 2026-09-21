@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -22,31 +22,46 @@ namespace NbrbCurrencyRates.Services
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            string fullPath =
-                Path.GetFullPath(filePath);
+            string fullPath = Path.GetFullPath(filePath);
+            string directory = Path.GetDirectoryName(fullPath);
 
-            string directory =
-                Path.GetDirectoryName(fullPath);
-
-            if (!string.IsNullOrWhiteSpace(directory) &&
-                !Directory.Exists(directory))
+            if (!string.IsNullOrWhiteSpace(directory))
             {
                 Directory.CreateDirectory(directory);
             }
 
-            using (var writer = new StreamWriter(
-                fullPath,
-                false,
-                new UTF8Encoding(false)))
+            string temporaryPath = fullPath + "." +
+                Guid.NewGuid().ToString("N") + ".tmp";
+
+            try
             {
-                await writer.WriteAsync(json)
-                    .ConfigureAwait(false);
+                using (var writer = new StreamWriter(
+                    temporaryPath,
+                    false,
+                    new UTF8Encoding(false)))
+                {
+                    await writer.WriteAsync(json).ConfigureAwait(false);
+                    await writer.FlushAsync().ConfigureAwait(false);
+                }
 
-                await writer.FlushAsync()
-                    .ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (File.Exists(fullPath))
+                {
+                    File.Replace(temporaryPath, fullPath, null);
+                }
+                else
+                {
+                    File.Move(temporaryPath, fullPath);
+                }
             }
-
-            cancellationToken.ThrowIfCancellationRequested();
+            finally
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
+            }
         }
 
         public async Task<string> LoadAsync(
@@ -66,12 +81,11 @@ namespace NbrbCurrencyRates.Services
                 filePath,
                 Encoding.UTF8))
             {
-                string json =
-                    await reader.ReadToEndAsync()
-                        .ConfigureAwait(false);
+                string json = await reader
+                    .ReadToEndAsync()
+                    .ConfigureAwait(false);
 
                 cancellationToken.ThrowIfCancellationRequested();
-
                 return json;
             }
         }
